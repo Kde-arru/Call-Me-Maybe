@@ -4,7 +4,7 @@ install:
 	uv sync
 
 run: install
-	PYTHONPATH=. uv run python -m src
+	HF_HOME=/tmp/$${USER}_hf_cache UV_CACHE_DIR=/tmp/$${USER}_uv_cache PYTHONPATH=. uv run python -m src
 
 debug: install
 	PYTHONPATH=. uv run python -m pdb -m src
