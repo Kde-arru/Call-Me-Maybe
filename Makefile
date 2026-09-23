@@ -10,7 +10,11 @@ debug: install
 	PYTHONPATH=. uv run python -m pdb -m src
 
 clean:
-	rm -rf __pycache__ src/__pycache__ .mypy_cache .venv
+	rm -rf __pycache__ src/__pycache__ .mypy_cache
+
+fclean:
+	$(clean)
+	rm -rf .venv
 
 lint:
 	uv run flake8 src/
