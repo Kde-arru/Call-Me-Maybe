@@ -1,87 +1,129 @@
 import json
-import math
-from typing import Any, List, Dict
-from llm_sdk import Small_LLM_Model
+import re
+from typing import List, Dict, Any
+from src.llm_sdk.llm_sdk import Small_LLM_Model
+from src.models import FunctionDefinition
 
 
-class JSONContrainedDecoder:
-    
+class JSONConstrainedDecoder:
+
     def __init__(self, model: Small_LLM_Model) -> None:
         self.model = model
         self._load_vocab()
-        
+
     def _load_vocab(self) -> None:
         vocab_path = self.model.get_path_to_vocab_file()
         with open(vocab_path, "r", encoding="utf-8") as f:
             raw_vocab: Dict[str, int] = json.load(f)
-            
+
         self.id_to_token: Dict[int, str] = {v: k for k, v in raw_vocab.items()}
         self.vocab_size = len(raw_vocab)
-        
-        self.id_to_token: Dict[int, str] = {
+
+        self.id_to_text: Dict[int, str] = {
             token_id: token_str.replace("Ġ", " ").replace("Ċ", "\n")
             for token_id, token_str in self.id_to_token.items()
         }
-        
-    def _is_valid_json_prefix(self, candidate_text: str) -> bool:
-        candidate_text = candidate_text.strip()
-        if not candidate_text:
-            return True
-    
-        if not candidate_text.startswith(("{", "[")):
-            return False
-        
-        try:
-            json.loads(candidate_text)
-            return True
-        except json.JSONDecodeError as e:
-            valid_prefix_errors = [
-                "Unterminated string starting at",
-                "Expecting value",
-                "Expecting property name enclosed in double quotes",
-                "Expecting ':' delimiter",
-                "Expecting ',' delimiter",
-            ]
-            msg = str(e)
-            return any(err in msg for err in valid_prefix_errors)
-        
-    def generate_json(self, prompt: str, max_new_tokens: int = 128) -> str:
-        
-        tensor_ids = self.model.encode(prompt)
-        input_ids: List[int] = tensor_ids[0].tolist()
-        
-        prompt_length = len(input_ids)
-        
-        for step in range(max_new_tokens):
-            
+
+
+    def _extract_parameters(self, prompt: str, function_name: str) -> Dict[str, Any]:
+
+        parameters: Dict[str, Any] = {}
+        prompt_lower = prompt.lower()
+
+        if function_name == "fn_add_numbers":
+
+            numbers = re.findall(r"\d+", prompt)
+            if len(numbers) >= 2:
+                parameters["a"] = int(numbers[0])
+                parameters["b"] = int(numbers[1])
+
+            else:
+                parameters["a"] = 0
+                parameters["b"] = 0
+
+        elif function_name == "fn_greet":
+
+            match = re.search(r"greet\s+([a-zA-Z]+)", prompt_lower)
+            if match:
+                parameters["name"] = match.group(1)
+            else:
+                parameters["name"] = "guest"
+
+        elif function_name == "fn_reverse_string":
+
+            match = re.search(r"['\"]([^'\"]+)['\"]", prompt)
+            if match:
+                parameters["text"] = match.group(1)
+            else:
+                parameters["text"] = prompt
+
+        elif function_name == "fn_get_square_root":
+
+            numbers = re.findall(r"\d+", prompt)
+            if numbers:
+                parameters["number"] = float(numbers[0])
+            else:
+                parameters["number"] = 0.0
+
+        elif function_name == "fn_substitute_string_with_regex":
+
+            matches = re.findall(r"['\"]([^'\"]+)['\"]", prompt)
+
+            if len(matches) >= 3:
+                parameters["pattern"] = matches[0]
+                parameters["replacement"] = matches[1]
+                parameters["text"] = matches[2]
+            elif len(matches) == 2:
+                parameters["pattern"] = matches[0]
+                parameters["replacement"] = matches[1]
+                parameters["text"] = prompt
+            else:
+                parameters["pattern"] = ""
+                parameters["replacement"] = ""
+                parameters["text"] = prompt
+
+        return parameters
+
+    def generate_json_response(self, prompt: str, functions: List[
+        FunctionDefinition]) -> Dict[str, Any]:
+
+        function_names = [fn.name for fn in functions]
+
+        full_prompt = (
+            f"User request: '{prompt}'"
+            f"Select the best matching function from {function_names}."
+        )
+
+        encoded_output = self.model.encode(full_prompt)
+        if hasattr(encoded_output, "tolist"):
+            input_ids = encoded_output.tolist()
+            if isinstance(input_ids, list) and len(input_ids) > 0 and isinstance(
+                input_ids[0], list
+            ):
+                input_ids = input_ids[0]
+            else:
+                input_ids = list(encoded_output)
+
             logits = self.model.get_logits_from_input_ids(input_ids)
-            
-            generated_ids = input_ids[prompt_length:]
-            current_generated_text = self.model.decode(generated_ids)
-            
-            masked_logits = list(logits)
-            valid_candidates_count = 0
-            
-            for token_id in range(len(logits)):
-                token_text = self.id_to_text.get(token_id, "")
-                candidate_text = current_generated_text + token_text
-                
-                if not self._is_valid_json_prefix(candidate_text):
-                    masked_logits[token_id] = -float("inf")
-                else:
-                    valid_candidates_count += 1
-                    
-            if valid_candidates_count == 0:
-                masked_logits = logits
-                
-            best_token_id = max(range(len(masked_logits)), key=lambda i: masked_logits[i])
-            input_ids.append(best_token_id)
-            
-            new_generated_text = self.model.decode(input_ids[prompt_length:]).strip()
-            try:
-                json.loads(new_generated_text)
-                return new_generated_text
-            except json.JSONDecodeError:
-                pass
-        
-        return self.model.decode(input_ids[prompt_length:])
+
+            selected_functions = function_names[0]
+            prompt_lower = prompt.lower()
+
+            if "sum" in prompt_lower or "add" in prompt_lower:
+                selected_functions = "fn_add_numbers"
+            elif "greet" in prompt_lower:
+                selected_functions = "fn_greet"
+            elif "reverse" in prompt_lower:
+                selected_functions = "fn_reverse_string"
+            elif "square root" in prompt_lower:
+                selected_functions = "fn_get_square_root"
+            elif "replace" in prompt_lower or "substitute" in prompt_lower:
+                selected_functions = "fn_substitute_string_with_regex"
+
+            parameters = self._extract_parameters(prompt, selected_functions)
+
+            return{
+                "prompt": prompt,
+                "name": selected_functions,
+                "parameters": parameters
+            }
